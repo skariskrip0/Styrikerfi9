@@ -67,14 +67,7 @@ uint8_t *allocHeap(uint8_t *currentHeap, uint64_t size)
 /* Global variable that indicates if debug is enabled or not */
 int debug = 0;
 
-/* Mutex for thread synchronization */
 static pthread_mutex_t malloc_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/* Allocation strategy */
-static AllocType _currentStrategy = ALLOC_BESTFIT;
-
-/* Last allocated block for next-fit strategy */
-static Block *_lastAllocatedBlock = NULL;
 
 /*
  * This is the heap you should use.
@@ -97,22 +90,21 @@ void initAllocator()
     _heapStart = allocHeap(NULL, HEAP_SIZE);
     _heapSize = HEAP_SIZE;
     
-    // Initialize first free block
     _firstFreeBlock = (Block*)_heapStart;
     _firstFreeBlock->size = HEAP_SIZE;
     _firstFreeBlock->next = NULL;
     pthread_mutex_unlock(&malloc_mutex);
 }
 
-
 /*
  * Gets the next block that should start after the current one.
  */
 static Block *_getNextBlockBySize(const Block *current)
 {
-	(void)current;
-	return NULL;
-	// See lab tutorial
+    if (current == NULL) return NULL;
+    uint8_t *next_addr = ((uint8_t*)current) + current->size;
+    if (next_addr >= _heapStart + _heapSize) return NULL;
+    return (Block*)next_addr;
 }
 
 /*
@@ -136,8 +128,7 @@ void dumpAllocator()
  */
 uint64_t roundUp(uint64_t n)
 {
-	// See lab tutorial
-	return n;
+    return (n + HEADER_SIZE - 1) & INV_HEADER_SIZE_MASK;
 }
 
 /* Helper function that allocates a block 
@@ -145,12 +136,41 @@ uint64_t roundUp(uint64_t n)
  */
 static void *allocate_block(Block **update_next, Block *block, uint64_t new_size)
 {
-	(void)update_next;
-	(void)block;
-	(void)new_size;
-	/* Not mandatory but possibly useful to implement this as a separate function
-	 * called by my_malloc */
-	return NULL;
+    *update_next = block->next;
+    
+    if (block->size > new_size + HEADER_SIZE) {
+        Block *new_block = (Block*)((uint8_t*)block + new_size);
+        new_block->size = block->size - new_size;
+        new_block->next = *update_next;
+        *update_next = new_block;
+        block->size = new_size;
+    }
+    
+    block->next = ALLOCATED_BLOCK_MAGIC;
+    return block->data;
+}
+
+static Block* find_block(uint64_t needed_size, Block **prev_out) {
+    Block *prev = NULL;
+    Block *current = _firstFreeBlock;
+    Block *best_block = NULL;
+    Block *best_prev = NULL;
+    uint64_t best_size = UINT64_MAX;
+    
+    while (current != NULL) {
+        if (current->size >= needed_size) {
+            if (current->size < best_size) {
+                best_block = current;
+                best_prev = prev;
+                best_size = current->size;
+            }
+        }
+        prev = current;
+        current = current->next;
+    }
+    
+    *prev_out = best_prev;
+    return best_block;
 }
 
 void *my_malloc(uint64_t size)
@@ -174,14 +194,12 @@ void *my_malloc(uint64_t size)
     Block *best_block = find_block(needed_size, &prev);
     
     if (best_block != NULL) {
-        // Remove from free list
         if (prev == NULL) {
             _firstFreeBlock = best_block->next;
         } else {
             prev->next = best_block->next;
         }
         
-        // Split if block is too big
         if (best_block->size > needed_size + HEADER_SIZE) {
             Block *new_block = (Block*)((uint8_t*)best_block + needed_size);
             new_block->size = best_block->size - needed_size;
@@ -201,7 +219,6 @@ void *my_malloc(uint64_t size)
         return best_block->data;
     }
     
-    // Try to extend heap
     uint64_t new_size = _heapSize + HEAP_SIZE;
     if (allocHeap(_heapStart, new_size) != NULL) {
         Block *new_block = (Block*)(_heapStart + _heapSize);
@@ -217,7 +234,6 @@ void *my_malloc(uint64_t size)
     return NULL;
 }
 
-
 /* Helper function to merge two freelist blocks.
  * Assume: block1 is at a lower address than block2
  * Does nothing if blocks are not neighbors (i.e. if block1 address + block1 size is not block2 address)
@@ -225,13 +241,8 @@ void *my_malloc(uint64_t size)
  */
 static void merge_blocks(Block *block1, Block *block2)
 {
-	(void)block1;
-	(void)block2;
-	/* TODO: Implement */
-	/* Note: Again this is not mandatory but possibly useful to put this in a separate
-	 * function called by my_free */
+    block1->size += block2->size;
 }
-
 
 void my_free(void *address)
 {
@@ -245,37 +256,29 @@ void my_free(void *address)
         return;
     }
     
-    // Remember original block for next-fit
-    Block *original_block = block;
-    
-    // First, check if we can merge with next block
     Block *next_block = _getNextBlockBySize(block);
     if (next_block && next_block->next != ALLOCATED_BLOCK_MAGIC) {
-        // Remove next block from free list
         Block **next_ptr = &_firstFreeBlock;
         while (*next_ptr != next_block) {
             next_ptr = &(*next_ptr)->next;
         }
         *next_ptr = next_block->next;
-        block->size += next_block->size;
+        merge_blocks(block, next_block);
     }
     
-    // Then check if we can merge with previous block
     Block *prev_block = _firstFreeBlock;
     Block **prev_ptr = &_firstFreeBlock;
     while (prev_block != NULL) {
         Block *next = _getNextBlockBySize(prev_block);
         if (next == block && prev_block->next != ALLOCATED_BLOCK_MAGIC) {
-            // Merge with previous block
-            prev_block->size += block->size;
-            block = prev_block;  // Update block to point to merged block
+            merge_blocks(prev_block, block);
+            block = prev_block;
             break;
         }
         prev_ptr = &prev_block->next;
         prev_block = *prev_ptr;
     }
     
-    // If we didn't merge with a previous block, insert the block into free list
     if (prev_block == NULL) {
         Block **insert_ptr = &_firstFreeBlock;
         while (*insert_ptr != NULL && *insert_ptr < block) {
@@ -283,13 +286,6 @@ void my_free(void *address)
         }
         block->next = *insert_ptr;
         *insert_ptr = block;
-    }
-    
-    // Update _lastAllocatedBlock for next-fit
-    if (_currentStrategy == ALLOC_NEXTFIT && 
-        (_lastAllocatedBlock == original_block || 
-         _lastAllocatedBlock == next_block)) {
-        _lastAllocatedBlock = block;
     }
     
     pthread_mutex_unlock(&malloc_mutex);
