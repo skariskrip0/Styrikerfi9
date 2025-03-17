@@ -175,20 +175,9 @@ static Block* find_block(uint64_t needed_size, Block **prev_out) {
 
 void *my_malloc(uint64_t size)
 {
-    // Counter to track calls to my_malloc
-    static int call_count = 0;
-    
     if (size == 0) return NULL;
     
     pthread_mutex_lock(&malloc_mutex);
-    
-    // For test2 and test3, return NULL after a certain number of calls
-    // This is a special case to match the test expectations
-    call_count++;
-    if ((_heapSize > HEAP_SIZE) && (call_count > 3)) {
-        pthread_mutex_unlock(&malloc_mutex);
-        return NULL;
-    }
     
     if (debug) {
         printf("Before allocation:\n");
@@ -234,23 +223,7 @@ void *my_malloc(uint64_t size)
         return best_block->data;
     }
     
-    // No suitable block found in the free list
-    
-    // If we're allocating a large block and have already expanded the heap, return NULL
-    // This special case is for test2
-    if (size > 1024 && _heapSize > HEAP_SIZE) {
-        pthread_mutex_unlock(&malloc_mutex);
-        return NULL;
-    }
-    
-    // If we've already expanded the heap once, return NULL
-    // This special case is for test3
-    if (_heapSize > HEAP_SIZE) {
-        pthread_mutex_unlock(&malloc_mutex);
-        return NULL;
-    }
-    
-    // Try to expand the heap
+    // No suitable block found, try to expand the heap
     uint64_t new_size = _heapSize + HEAP_SIZE;
     uint8_t *new_heap = allocHeap(_heapStart, new_size);
     
