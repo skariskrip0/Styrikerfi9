@@ -185,53 +185,70 @@ void *my_malloc(uint64_t size)
     }
     
     uint64_t needed_size = roundUp(size + HEADER_SIZE);
-    if (needed_size > HEAP_SIZE - HEADER_SIZE) {
+    
+    // Check if the requested size is too large for any possible allocation
+    if (needed_size > _heapSize) {
         pthread_mutex_unlock(&malloc_mutex);
         return NULL;
     }
     
+    // Try to find a suitable block
     Block *prev = NULL;
     Block *best_block = find_block(needed_size, &prev);
     
-    if (best_block != NULL) {
-        if (prev == NULL) {
-            _firstFreeBlock = best_block->next;
-        } else {
-            prev->next = best_block->next;
+    if (best_block == NULL) {
+        // No suitable block found, try to expand the heap
+        uint64_t new_size = _heapSize + HEAP_SIZE;
+        uint8_t *new_heap = allocHeap(_heapStart, new_size);
+        
+        if (new_heap == NULL) {
+            // Cannot expand heap further
+            pthread_mutex_unlock(&malloc_mutex);
+            return NULL;
         }
         
-        if (best_block->size > needed_size + HEADER_SIZE) {
-            Block *new_block = (Block*)((uint8_t*)best_block + needed_size);
-            new_block->size = best_block->size - needed_size;
-            new_block->next = _firstFreeBlock;
-            _firstFreeBlock = new_block;
-            best_block->size = needed_size;
-        }
-        
-        best_block->next = ALLOCATED_BLOCK_MAGIC;
-        
-        if (debug) {
-            printf("After allocation:\n");
-            dumpAllocator();
-        }
-        
-        pthread_mutex_unlock(&malloc_mutex);
-        return best_block->data;
-    }
-    
-    uint64_t new_size = _heapSize + HEAP_SIZE;
-    if (allocHeap(_heapStart, new_size) != NULL) {
+        // Heap expanded successfully
         Block *new_block = (Block*)(_heapStart + _heapSize);
         new_block->size = HEAP_SIZE;
         new_block->next = _firstFreeBlock;
         _firstFreeBlock = new_block;
         _heapSize = new_size;
-        pthread_mutex_unlock(&malloc_mutex);
-        return my_malloc(size);
+        
+        // Try to find a suitable block again
+        prev = NULL;
+        best_block = find_block(needed_size, &prev);
+        
+        // If still no suitable block, return NULL
+        if (best_block == NULL) {
+            pthread_mutex_unlock(&malloc_mutex);
+            return NULL;
+        }
+    }
+    
+    // Allocate from the found block
+    if (prev == NULL) {
+        _firstFreeBlock = best_block->next;
+    } else {
+        prev->next = best_block->next;
+    }
+    
+    if (best_block->size > needed_size + HEADER_SIZE) {
+        Block *new_block = (Block*)((uint8_t*)best_block + needed_size);
+        new_block->size = best_block->size - needed_size;
+        new_block->next = _firstFreeBlock;
+        _firstFreeBlock = new_block;
+        best_block->size = needed_size;
+    }
+    
+    best_block->next = ALLOCATED_BLOCK_MAGIC;
+    
+    if (debug) {
+        printf("After allocation:\n");
+        dumpAllocator();
     }
     
     pthread_mutex_unlock(&malloc_mutex);
-    return NULL;
+    return best_block->data;
 }
 
 /* Helper function to merge two freelist blocks.
